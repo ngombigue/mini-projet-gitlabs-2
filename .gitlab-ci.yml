@@ -1,0 +1,98 @@
+stages:
+  - build
+  - test
+  - release
+  - deploy
+
+variables:
+  IMAGE_NAME: 'mini-projet-gitlab'
+  IMAGE_TAG: 'v1'
+  DOCKER_USERNAME: 'ngombig'
+  #DOCKER_PASSWORD:
+  HOST_PORT: 80
+  CONTAINER_PORT: 80
+  SERVER_USERNAME: 'ubuntu'
+
+# --- BUILD ---
+Build:
+  stage: build
+  image: docker:latest
+  services:
+    - name: docker:dind
+      alias: docker
+  script:
+    - docker build --no-cache -t $IMAGE_NAME:$IMAGE_TAG .
+    - docker save -o mini-projet-gitlab.tar $IMAGE_NAME:$IMAGE_TAG
+  artifacts:
+    paths:
+      - mini-projet-gitlab.tar
+
+# --- TEST ---
+test:
+  stage: test
+  image: docker:latest
+  services:
+    - name: docker:dind
+      alias: docker
+  before_script:
+    - apk add --no-cache curl
+  script:
+    - docker load -i mini-projet-gitlab.tar
+    - docker run -d -p $HOST_PORT:$CONTAINER_PORT --name test-container $IMAGE_NAME:$IMAGE_TAG
+    - sleep 5
+    - curl -I http://localhost:$HOST_PORT | grep -i "200 OK"
+    - docker stop test-container
+
+# --- RELEASE ---
+Release:
+  stage: release
+  image: docker:latest
+  services:
+    - name: docker:dind
+      alias: docker
+  script:
+   # a utiliser lorsque la variable est disponible sur gitlab
+    - echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin 
+   # a utiliser lorsque a variable est define dans le code 
+   #  docker login -u $DOCKER_USERNAME -p $DOCKER_PASSWORD 
+    - docker load -i mini-projet-gitlab.tar
+    - docker tag $IMAGE_NAME:$IMAGE_TAG $DOCKER_USERNAME/$IMAGE_NAME:$IMAGE_TAG
+    - docker push $DOCKER_USERNAME/$IMAGE_NAME:$IMAGE_TAG
+
+# --- DEPLOY TEMPLATE ---
+.deploy_template: &deploy_template
+  stage: deploy
+  image: alpine
+  before_script:
+    - apk add --no-cache openssh
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | base64 -d > /tmp/id_rsa
+    - chmod 600 /tmp/id_rsa
+    - ssh-add /tmp/id_rsa
+    - mkdir -p ~/.ssh
+    - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+  script:
+    - ssh -o StrictHostKeyChecking=no -i /tmp/id_rsa $SERVER_USERNAME@$SERVER_IP "docker pull $DOCKER_USERNAME/$IMAGE_NAME:$IMAGE_TAG"
+    - ssh -o StrictHostKeyChecking=no -i /tmp/id_rsa $SERVER_USERNAME@$SERVER_IP "docker run -d -p $HOST_PORT:$CONTAINER_PORT --name $IMAGE_NAME $DOCKER_USERNAME/$IMAGE_NAME:$IMAGE_TAG"
+
+# --- DEPLOY JOBS ---
+Deploy Review:
+  <<: *deploy_template
+  variables:
+    SERVER_IP: 'REVIEW_SERVER_IP_HERE'
+  environment:
+    name: review
+
+Deploy Staging:
+  <<: *deploy_template
+  variables:
+    SERVER_IP: 'STAGING_SERVER_IP_HERE'
+  environment:
+    name: staging
+
+Deploy Production:
+  <<: *deploy_template
+  variables:
+    SERVER_IP: 'PRODUCTION_SERVER_IP_HERE'
+  environment:
+    name: production
